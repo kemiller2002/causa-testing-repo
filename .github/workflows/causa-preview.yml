@@ -1,0 +1,65 @@
+# Causa preview: real-provider acceptance against this repository, then deployment to GitHub Pages.
+# The application source is kemiller2002/Indy-init preview/causa on the branch below; the historical catalog is
+# kemiller2002/causa-data. The only credential is this workflow's own GITHUB_TOKEN (contents: write on this
+# repository); tests write only under workspaces/demo/<workspace>/.
+name: Causa preview
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/causa-preview.yml"]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: causa-preview
+  cancel-in-progress: false
+
+env:
+  APP_REPO: kemiller2002/Indy-init
+  APP_REF: claude/causa-historical-compatibility-09j9rw
+
+jobs:
+  real-provider:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { repository: "${{ env.APP_REPO }}", ref: "${{ env.APP_REF }}", path: app }
+      - uses: actions/checkout@v4
+        with: { repository: kemiller2002/causa-data, ref: e8259df74add723765c57a5b1a5888d9c3f707af, path: causa-data }
+      - uses: actions/setup-dotnet@v4
+        with: { global-json-file: app/global.json }
+      - name: Engine tests (in-process GitHub double, real catalog bytes)
+        run: dotnet run --project app/preview/causa/tests/Engine.Tests -c Release -- "$GITHUB_WORKSPACE/causa-data"
+      - name: Real-provider acceptance (create, edit, save, read-back, fresh reload, conflict) against this repository
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: dotnet run --project app/preview/causa/tests/Engine.Tests -c Release --no-build -- "$GITHUB_WORKSPACE/causa-data" --real "$GITHUB_REPOSITORY" "preview-ci-$GITHUB_RUN_ID"
+
+  build-and-deploy:
+    needs: real-provider
+    runs-on: ubuntu-latest
+    environment: { name: github-pages, url: "${{ steps.deploy.outputs.page_url }}" }
+    steps:
+      - uses: actions/checkout@v4
+        with: { repository: "${{ env.APP_REPO }}", ref: "${{ env.APP_REF }}", path: app }
+      - uses: actions/setup-dotnet@v4
+        with: { global-json-file: app/global.json }
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - name: Build the site (WebAssembly app, Limen, Forma)
+        working-directory: app/preview/causa
+        run: |
+          (cd web && npm ci --no-audit --no-fund)
+          dotnet fsi build.fsx
+          dotnet fsi tests/ArchitectureCheck.fsx
+          echo "{\"source\":\"${APP_REPO}@$(git -C .. rev-parse HEAD)\"}" > dist/version.json
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: app/preview/causa/dist }
+      - id: deploy
+        uses: actions/deploy-pages@v4
